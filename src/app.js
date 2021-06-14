@@ -2,6 +2,7 @@ const app = require("express")();
 const http = require("http").Server(app);
 const io = require("socket.io")(http);
 const cors = require("cors");
+const users = require("./users")();
 
 app.use(
     cors({
@@ -13,10 +14,6 @@ app.use(
 app.get("/", (req, res) => {
     res.send("<h1>Hello world</h1>");
 });
-
-const messages = [];
-
-const usersState = new Map();
 
 const messageHandler = (message, user) => ({
     message,
@@ -32,17 +29,20 @@ io.on("connection", (socket) => {
 
         socket.join(data.room);
 
-        cb(socket.id);
-
-        usersState.set(socket, {
+        users.remove(socket.id);
+        users.add({
             id: socket.id,
             name: data.name,
             room: data.room,
         });
 
+        cb(socket.id);
+
+        io.to(data.room).emit("update-users", users.getByRoom(data.room));
+
         socket.emit(
             "new-message-sent",
-            messageHandler(`${data.name} welcom the room`, {
+            messageHandler(`${data.name} welcom to the room`, {
                 id: "1",
                 name: "admin",
                 room: data.room,
@@ -51,7 +51,7 @@ io.on("connection", (socket) => {
 
         socket.broadcast.to(data.room).emit(
             "new-message-sent",
-            messageHandler(`${data.name} entered to room`, {
+            messageHandler(`${data.name} entered the room`, {
                 id: "1",
                 name: "admin",
                 room: data.room,
@@ -59,13 +59,51 @@ io.on("connection", (socket) => {
         );
     });
 
-    socket.on("disconnect", () => {
-        usersState.delete(socket);
-        console.log("a user disconnected");
+    socket.on("client-user-Left", () => {
+        const user = users.remove(socket.id);
+        io.to(user.room).emit("update-users", users.getByRoom(user.room));
+        io.to(user.room).emit(
+            "new-message-sent",
+            messageHandler(`${user.name} left the room`, {
+                id: "1",
+                name: "admin",
+                room: user.room,
+            })
+        );
+
+        socket.emit("user-left-room");
+
+        console.log("user disconnected");
+    });
+
+    socket.on("disconnect", (user) => {
+        users.remove(socket.id);
+
+        io.to(user.room).emit("update-users", users.getByRoom(user.room));
+        io.to(user.room).emit(
+            "new-message-sent",
+            messageHandler(`${user.name} left the room`, {
+                id: "1",
+                name: "admin",
+                room: user.room,
+            })
+        );
+
+        console.log("user disconnected");
     });
 
     socket.on("client-typed", () => {
-        socket.broadcast.emit("user-is-typing", usersState.get(socket));
+        const user = users.get(socket.id);
+        socket.broadcast
+            .to(user.room)
+            .emit("user-is-typing", users.get(socket.id));
+    });
+
+    socket.on("client-stop-typed", () => {
+        const user = users.get(socket.id);
+        socket.broadcast
+            .to(user.room)
+            .emit("user-stoped-typing", users.get(socket.id));
     });
 
     socket.on("client-message-sent", (message, successFn) => {
@@ -74,27 +112,20 @@ io.on("connection", (socket) => {
             return;
         }
 
-        const user = usersState.get(socket);
-
-        let messageItem = {
-            message: message,
-            id: "12345" + new Date().getTime(),
-            user: { id: user.id, name: user.name, room: user.room },
-        };
-        messages.push(messageItem);
-
-        io.emit("new-message-sent", messageItem);
+        const user = users.get(socket.id);
+        if (user) {
+            let messageItem = messageHandler(message, {
+                id: user.id,
+                name: user.name,
+                room: user.room,
+            });
+            io.to(user.room).emit("new-message-sent", messageItem);
+        }
 
         successFn(null);
     });
 
-    socket.on("client-deleted-all-messages", () => {
-        messages.length = 0;
-    });
-
-    socket.emit("init-messages-published", messages);
-
-    console.log("a user connected");
+    console.log("user connected");
 });
 
 const PORT = process.env.PORT || 3009;
